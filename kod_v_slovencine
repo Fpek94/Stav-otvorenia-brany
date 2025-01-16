@@ -1,0 +1,141 @@
+#include <Arduino.h> // Zahrnutie všetkých knižníc dostupných v IDE
+#include <ESP_Mail_Client.h> // Knižnica na prácu s e-mailom
+#include <WiFi.h> // Načítanie WiFi knižnice pre ESP32
+
+// WiFi nastavenia
+const char* nazov_wifi = "xxxx";      // Názov WiFi siete (SSID)
+const char* heslo_wifi = "xxxx";  // Heslo k WiFi
+
+// Definovanie pinov pre ultrazvukový senzor
+const int trigPin = 21; // Pripojený na TRIG pin ultrazvukového senzora
+const int echoPin = 5;  // Pripojený na ECHO pin ultrazvukového senzora
+
+// Definovanie pinu pre LED diódu
+const int ledPin = 23; // Pripojený na pin, kde je zapojená červená LED dióda
+
+// Definovanie pinu pre aktívny bzučiak
+const int buzzerPin = 4;  // GPIO pin, na ktorý je pripojený aktívny bzučiak
+
+// Práh vzdialenosti na určenie, či je brána otvorená (v centimetroch)
+const int prahVzdialenosti = 5; // Prispôsob podľa potreby
+
+// SMTP nastavenia
+#define SMTP_HOST "smtp.azet.sk" // Definovanie SMTP hostiteľa
+#define SMTP_PORT 465 // Definovanie SMTP portu
+
+// Definovanie e-mailu odosielateľa a príjemcu
+#define EMAIL_ODOSIELATEL "xxxx" // E-mail odosielateľa
+#define HESLO_ODOSIELATEL "xxxx" // Heslo e-mailu odosielateľa
+#define EMAIL_PRIJEMCA "xxxx" // E-mail príjemcu
+
+SMTPSession smtp; // Objekt na odosielanie e-mailov
+ESP_Mail_Session udaje; // Objekt pre konfiguráciu e-mailu
+SMTP_Message sprava; // Objekt pre správu, ktorú posielame
+
+unsigned long casOtvorenia = 0;  // Uchováva čas otvorenia brány
+unsigned long casPoslednehoEmailu = 0; // Uchováva čas posledného odoslania e-mailu
+
+void overenie(SMTP_Status stav) {
+  if (stav.success()) {
+    Serial.println("E-mail úspešne odoslaný.");
+  } else {
+    Serial.println("Chyba pri odosielaní e-mailu:");
+    Serial.println(stav.info());
+  }
+}
+
+void odoslatEmail() {
+  sprava.sender.name = "ESP32";
+  sprava.sender.email = EMAIL_ODOSIELATEL;
+  sprava.subject = "ESP32 Overovací e-mail";
+  sprava.addRecipient("Majiteľ", EMAIL_PRIJEMCA);
+  String textSpravy = "Brána je otvorená viac ako 2 minúty - Poslané z ESP32";
+  sprava.text.content = textSpravy.c_str();
+
+  // Pripojenie k SMTP serveru a odoslanie e-mailu
+  if (!smtp.connect(&udaje)) {
+    Serial.println("Chyba pri pripojení k SMTP serveru.");
+    return;
+  }
+
+  if (!MailClient.sendMail(&smtp, &sprava)) {
+    Serial.println("Chyba pri odosielaní e-mailu: " + smtp.errorReason());
+  }
+}
+
+void setup() {
+  // Nastavenie pinov
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  pinMode(ledPin, OUTPUT);
+  pinMode(buzzerPin, OUTPUT);
+
+  // Inicializácia sériovej komunikácie pre monitorovanie vzdialenosti
+  Serial.begin(115200);
+  delay(100);
+
+  // WiFi pripojenie
+  Serial.println("Pripájam sa na WiFi...");
+  WiFi.begin(nazov_wifi, heslo_wifi);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi pripojenie úspešné!");
+  Serial.print("IP adresa: ");
+  Serial.println(WiFi.localIP());
+
+  // Nastavenie SMTP pripojenia
+  udaje.server.host_name = SMTP_HOST;
+  udaje.server.port = SMTP_PORT;
+  udaje.login.email = EMAIL_ODOSIELATEL;
+  udaje.login.password = HESLO_ODOSIELATEL;
+  udaje.login.user_domain = "";
+
+  smtp.callback(overenie); // Funkcia na overenie stavu odosielania
+}
+
+void loop() {
+  // Poslanie signálu do ultrazvukového senzora
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  // Výpočet vzdialenosti na základe času odozvy
+  long trvanie = pulseIn(echoPin, HIGH);
+  int vzdialenost = trvanie * 0.034 / 2;
+
+  // Ak je brána otvorená
+  if (vzdialenost > prahVzdialenosti) {
+    if (casOtvorenia == 0) {
+      casOtvorenia = millis();  // Nastavíme čas otvorenia
+      casPoslednehoEmailu = casOtvorenia; // Nastavíme čas prvého e-mailu
+    } else {
+      // Ak je brána otvorená viac ako 2 minúty a ešte sme neposlali e-mail
+      if (millis() - casOtvorenia >= 120000 && millis() - casPoslednehoEmailu >= 300000) {
+        odoslatEmail();
+        casPoslednehoEmailu = millis(); // Aktualizujeme čas posledného e-mailu
+      }
+    }
+
+    // Zobrazenie času otvorenia brány v sekundách
+    Serial.print("Čas otvorenia brány: ");
+    Serial.print((millis() - casOtvorenia) / 1000);  // Čas otvorenia v sekundách
+    Serial.println(" sekúnd");
+
+    // Rozsvietenie LED a aktivovanie bzučiaka
+    digitalWrite(ledPin, HIGH);
+    digitalWrite(buzzerPin, HIGH);
+  } else {
+    // Ak je brána zatvorená, resetujeme čas otvorenia a čas posledného e-mailu
+    casOtvorenia = 0;          // Resetovanie času
+    casPoslednehoEmailu = 0;         // Resetovanie času e-mailu
+    digitalWrite(ledPin, LOW);
+    digitalWrite(buzzerPin, LOW);
+  }
+
+  // Malé oneskorenie pred opakovaním
+  delay(500);
+}
